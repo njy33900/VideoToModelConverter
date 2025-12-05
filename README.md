@@ -41,8 +41,10 @@ pip install opencv-python ultralytics pandas numpy tensorflow scikit-learn pillo
 ## 🚀 사용 방법 (Usage)
 ### 1. 데이터 준비
 raw_videos 폴더 내에 클래스별로 영상을 넣습니다.
-- neutral: 가만히 서 있거나, 핸드폰 보기, 뒷짐 지기 등. ※ 발이 떨어지지 않는 자세들
-- movement: 걷기, 뛰기, 물건 들고 이동하기 등. ※ 발이 움직이는 자세들
+- neutral: 가만히 서 있거나, 핸드폰 보기, 뒷짐 지기 등.  
+  ※ 발이 떨어지지 않는 자세들
+- movement: 걷기, 뛰기, 물건 들고 이동하기 등.  
+  ※ 발이 움직이는 자세들
 - threat: 손 뻗기, 주먹질, 쓰러짐 등 위협적인 행동.
 ### 2. 프로그램 실행
 run.bat을 실행합니다.
