@@ -1,6 +1,6 @@
 ## 개요
 
-YOLO Pose Estimation을 이용해 영상에서 사람의 관절 데이터를 추출하고,
+YOLO Pose Estimation을 이용해 영상에서 사람의 관절 데이터를 추출하고,  
 LSTM(Long Short-Term Memory) 신경망을 통해 행동(정지, 이동, 위협)을 분류/학습하는 올인원 시스템입니다.
 
 ## 📂 프로젝트 구조
