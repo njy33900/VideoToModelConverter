@@ -28,6 +28,16 @@ VideoToCSV/
 Python 3.8+  
 NVIDIA GPU (권장, CUDA 설정 필요)
 
+### 설치
+저장소를 클론합니다.
+```
+git clone https://github.com/your-username/your-repo-name.git
+```
+필수 라이브러리를 설치합니다.
+```
+pip install opencv-python ultralytics pandas numpy tensorflow scikit-learn pillow
+```
+
 ## 🚀 사용 방법 (Usage)
 ### 1. 데이터 준비
 raw_videos 폴더 내에 클래스별로 영상을 넣습니다.
