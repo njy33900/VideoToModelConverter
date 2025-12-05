@@ -31,7 +31,7 @@ NVIDIA GPU (권장, CUDA 설정 필요)
 ### 설치
 저장소를 클론합니다.
 ```
-git clone https://github.com/your-username/your-repo-name.git
+git clone https://github.com/njy33900/VideoToModelConverter.git
 ```
 필수 라이브러리를 설치합니다.
 ```
