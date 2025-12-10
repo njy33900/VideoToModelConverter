@@ -8,6 +8,7 @@ import datetime
 import threading
 import time
 from typing import List, Dict, Any, Tuple
+from collections import deque
 
 from pose_utils import *
 
@@ -112,28 +113,17 @@ class VideoConverter:
             total_progress: float,
             progress_callback=None
     ) -> None:
-        """
-        단일 비디오 파일을 처리하여 시퀀스 데이터를 추출하고 저장소에 추가
-        """
         cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            print(f"경고: '{video_path}' 파일을 열 수 없습니다.")
-            return
+        if not cap.isOpened(): return
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         filename = os.path.basename(video_path)
-
-        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
         if fps == 0: fps = 30.0
-
-        target_interval = 0.1
-        frame_step = max(1, int(fps * target_interval))
+        frame_step = max(1, int(fps * 0.1))
 
         frame_idx = 0
-        temp_buffer = []
+        position_buffer = deque(maxlen=self.seq_length)
         last_valid_pose = np.zeros((17, 2))
 
         while not self.stop_event.is_set():
@@ -149,17 +139,14 @@ class VideoConverter:
             frame_idx += 1
             if frame_idx % frame_step != 0: continue
 
-            # 레터박스를 포함한 리사이즈
             frame_resized = letterbox_resize(frame, self.resize_dims)
             results = self.model(frame_resized, verbose=False, conf=0.5, device=self.device)
-
             display_frame = frame_resized.copy()
 
+            norm_kp = np.zeros(34)
             if results[0].keypoints is not None and len(results[0].keypoints.xy) > 0:
-                # 화면 내 가장 큰 사람을 추적
                 all_boxes = results[0].boxes.xyxy.cpu().numpy()
-                box_areas = (all_boxes[:, 2] - all_boxes[:, 0]) * (all_boxes[:, 3] - all_boxes[:, 1])
-                target_index = np.argmax(box_areas)
+                target_index = np.argmax((all_boxes[:, 2] - all_boxes[:, 0]) * (all_boxes[:, 3] - all_boxes[:, 1]))
 
                 raw_kp = results[0].keypoints.xy.cpu().numpy()[target_index]
                 conf = results[0].keypoints.conf.cpu().numpy()[target_index]
@@ -168,40 +155,54 @@ class VideoConverter:
                 filled_kp = fill_missing_keypoints(raw_kp, conf, last_valid_pose)
                 last_valid_pose = filled_kp
                 anchor = get_stable_anchor(filled_kp, conf)
-                normalized_data = normalize_to_relative(filled_kp, anchor)
-                temp_buffer.append(normalized_data)
 
+                norm_kp = normalize_to_relative(filled_kp, anchor)
                 self._draw_visualization(display_frame, raw_kp, conf, box)
 
-                # 데이터 저장 버퍼
-                if len(temp_buffer) == self.seq_length:
-                    seq = list(temp_buffer)
-                    flat = np.array(seq).flatten().tolist()
-                    flat.append(label)
-                    flat.append(filename)
-                    end_frame = frame_idx
-                    start_frame = max(0, end_frame - (self.seq_length * frame_step))
-                    flat.append(f"{start_frame}~{end_frame}")
-                    end_sec = end_frame / fps
-                    start_sec = start_frame / fps
-                    time_str = f"{int(start_sec // 60):02d}:{int(start_sec % 60):02d}-{int(end_sec // 60):02d}:{int(end_sec % 60):02d}"
-                    flat.append(time_str)
-                    data_storage.append(flat)
-                    cv2.circle(display_frame, (self.resize_dims[0] - 20, 20), 8, (0, 0, 255), -1)
-                    temp_buffer = []
+            position_buffer.append(norm_kp)
+
+            # 모든 프레임에서 데이터를 생성합니다.
+            if len(position_buffer) == self.seq_length:
+                pos_seq = np.array(position_buffer)
+                vel_seq = np.diff(pos_seq, axis=0)
+                acc_seq = np.diff(vel_seq, axis=0)
+
+                vel_seq_padded = np.pad(vel_seq, ((1, 0), (0, 0)), 'constant')
+                acc_seq_padded = np.pad(acc_seq, ((2, 0), (0, 0)), 'constant')
+
+                full_feature_seq = np.concatenate((pos_seq, vel_seq_padded, acc_seq_padded), axis=1)
+                flat = full_feature_seq.flatten().tolist()
+
+                flat.append(label)
+                flat.append(filename)
+
+                end_frame = frame_idx
+                start_frame = max(0, end_frame - (self.seq_length * frame_step))
+                flat.append(f"{start_frame}~{end_frame}")
+
+                end_sec, start_sec = end_frame / fps, start_frame / fps
+                time_str = f"{int(start_sec // 60):02d}:{int(start_sec % 60):02d}-{int(end_sec // 60):02d}:{int(end_sec % 60):02d}"
+                flat.append(time_str)
+                data_storage.append(flat)
+
+                cv2.circle(display_frame, (self.resize_dims[0] - 20, 20), 8, (0, 0, 255), -1)
 
             file_progress = (frame_idx / total_frames) * 100 if total_frames > 0 else 0
             if progress_callback:
                 progress_callback(os.path.basename(video_path), file_progress, total_progress)
 
-            # 프리뷰(변환 진행화면) 오버레이
-            cv2.putText(display_frame, f"File: {filename}", (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
-            cv2.putText(display_frame, f"File Progress: {file_progress:.1f}%", (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3,
-                        (0, 255, 255), 1)
-            cv2.putText(display_frame, f"Total Progress: {total_progress:.1f}%", (5, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.3,
-                        (255, 255, 0), 1)
-            cv2.putText(display_frame, f"Class: {label.upper()}", (5, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0),
-                        1)
+            # 진행상황 오버레이
+            cv2.putText(display_frame, f"File: {filename}", (5, 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+            cv2.putText(display_frame, f"File Progress: {file_progress:.1f}%", (5, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+            cv2.putText(display_frame, f"Total Progress: {total_progress:.1f}%", (5, 45),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+
+            cv2.putText(display_frame, f"Class: {label.upper()}", (5, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
 
             cv2.imshow("Preview", display_frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):

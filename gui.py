@@ -206,12 +206,9 @@ class MainGUI:
         paned = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # 좌측 창: 제어판
-        # PanedWindow는 자식으로 Frame을 하나 더 갖는 것이 안정적입니다.
         left_container = tk.Frame(paned, width=300)
         paned.add(left_container, weight=1)  # [핵심] PanedWindow에 좌측 창 추가
 
-        # 실제 위젯들은 이 left_container 안에 배치됩니다.
 
         # 모델 선택
         model_frame = ttk.LabelFrame(left_container, text="모델 선택")
@@ -399,7 +396,8 @@ class MainGUI:
             dataset = self.converter.process_folder(source_dir, progress_callback=progress_update_callback)
             self.root.after(0, self._finish_conversion, dataset)
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("변환 오류", str(e)))
+            error_message = traceback.format_exc()
+            self.root.after(0, lambda msg=error_message: messagebox.showerror("변환 오류", msg))
         finally:
             self.root.after(0, self._reset_conv_ui)
 
@@ -408,7 +406,17 @@ class MainGUI:
             if not os.path.exists(self.save_root): os.makedirs(self.save_root)
             ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
             path = os.path.join(self.save_root, f"pose_data_{ts}.csv")
-            cols = [f'v{i}' for i in range(30 * 34)] + ['label', 'filename', 'frame', 'time']
+
+            # 30 프레임 * (34 위치 + 34 속도 + 34 가속도) = 30 * 102 = 3060
+            num_features = self.converter.seq_length * 34 * 3
+            cols = [f'v{i}' for i in range(num_features)] + ['label', 'filename', 'frame', 'time']
+
+            # 데이터 행의 길이와 컬럼 수가 일치하는지 확인
+            if len(dataset[0]) != len(cols):
+                messagebox.showerror("오류", f"데이터와 컬럼의 길이가 일치하지 않습니다!\n데이터: {len(dataset[0])}, 컬럼: {len(cols)}")
+                self._reset_conv_ui()
+                return
+
             pd.DataFrame(dataset, columns=cols).to_csv(path, index=False)
             messagebox.showinfo("완료", f"저장됨:\n{path}")
             self._load_csv_list()
@@ -489,36 +497,42 @@ class MainGUI:
     def _run_test(self, video_path, yolo_path, lstm_path):
         try:
             self.tester = VideoTester(yolo_path, lstm_path)
+            self.root.after(0, self.lbl_prediction.config, {'text': "분석 시작...", 'fg': 'green'})
+
             cap = cv2.VideoCapture(video_path)
             while not self.stop_test_event.is_set():
                 ret, frame = cap.read()
                 if not ret:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
+
                 pred_label, display_frame = self.tester.process_frame(frame)
+
                 h, w, _ = display_frame.shape
                 max_h, max_w = self.lbl_test_preview.winfo_height(), self.lbl_test_preview.winfo_width()
                 if max_w < 10 or max_h < 10: max_h, max_w = 600, 800
                 scale = min(max_w / w, max_h / h)
-                if scale < 1: display_frame = cv2.resize(display_frame, (int(w * scale), int(h * scale)))
+                if scale < 1:
+                    display_frame = cv2.resize(display_frame, (int(w * scale), int(h * scale)))
+
                 rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
                 imgtk = ImageTk.PhotoImage(image=Image.fromarray(rgb_frame))
+
                 self.root.after(0, self._update_test_ui, pred_label, imgtk)
                 time.sleep(0.01)
+
             cap.release()
         except Exception as e:
             error_details = traceback.format_exc()
-            self.root.after(0, lambda: messagebox.showerror("테스트 오류", error_details))
+            self.root.after(0, lambda msg=error_details: messagebox.showerror("테스트 오류", msg))
         finally:
             self.root.after(0, self._reset_test_ui)
 
     def _update_test_ui(self, label, imgtk):
         if not self.is_testing: return
 
-        # [핵심 수정] 전달받은 여러 줄의 레이블을 그대로 표시합니다.
         self.lbl_prediction.config(text=label)
 
-        # 색상은 첫 번째 예측 결과를 기준으로 결정합니다.
         first_prediction = label.split('\n')[0]
 
         if any(keyword in first_prediction.lower() for keyword in ["punching", "theft", "pushing"]):

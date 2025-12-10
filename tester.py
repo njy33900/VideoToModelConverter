@@ -45,9 +45,7 @@ class VideoTester:
         print(f"Loading LSTM model: {lstm_model_path}")
         self.lstm_model = tf.keras.models.load_model(lstm_model_path)
 
-        # [핵심 수정] 클래스 이름 매핑 파일 로드
         self.class_names = []
-        # .h5 파일 경로에서 _classes.json 파일 경로를 추론
         class_map_path = lstm_model_path.replace('.h5', '_classes.json')
 
         if os.path.exists(class_map_path):
@@ -72,19 +70,18 @@ class VideoTester:
 
     def process_frame(self, frame: np.ndarray) -> (str, np.ndarray):
         """
-        단일 영상 프레임을 처리하여 행동을 예측하고 시각화된 프레임을 반환
+        학습 파이프라인과 동일하게 위치, 속도, 가속도 특징을 생성
         """
         frame_resized = letterbox_resize(frame, self.resize_dims)
         display_frame = frame_resized.copy()
 
         results = self.yolo_model(frame_resized, verbose=False, conf=0.5, device=self.device)
-
         person_detected = results[0].keypoints is not None and len(results[0].keypoints.xy) > 0
 
+        norm_kp = np.zeros(34)  # 기본값
         if person_detected:
             all_boxes = results[0].boxes.xyxy.cpu().numpy()
-            box_areas = (all_boxes[:, 2] - all_boxes[:, 0]) * (all_boxes[:, 3] - all_boxes[:, 1])
-            target_index = np.argmax(box_areas)
+            target_index = np.argmax((all_boxes[:, 2] - all_boxes[:, 0]) * (all_boxes[:, 3] - all_boxes[:, 1]))
 
             raw_kp = results[0].keypoints.xy.cpu().numpy()[target_index]
             conf = results[0].keypoints.conf.cpu().numpy()[target_index]
@@ -93,34 +90,53 @@ class VideoTester:
             filled_kp = fill_missing_keypoints(raw_kp, conf, self.last_valid_pose)
             self.last_valid_pose = filled_kp
             anchor = get_stable_anchor(filled_kp, conf)
-            normalized_data = normalize_to_relative(filled_kp, anchor)
 
-            self.buffer.append(normalized_data)
-
-            if len(self.buffer) == self.seq_length:
-                sequence_data = np.array(self.buffer)
-                input_data = np.expand_dims(sequence_data, axis=0)
-
-                prediction_probs = self.lstm_model.predict(input_data, verbose=0)[0]
-                predicted_idx = np.argmax(prediction_probs)
-                confidence = prediction_probs[predicted_idx]
-
-                # [핵심 수정] 예측된 인덱스를 실제 클래스 이름으로 변환
-                predicted_class_name = f"Class #{predicted_idx}"  # 기본값 (매핑 파일 없을 시)
-                if self.class_names and predicted_idx < len(self.class_names):
-                    # 매핑 파일이 있고, 인덱스가 범위 내에 있으면 이름으로 변환
-                    predicted_class_name = self.class_names[predicted_idx]
-
-                self.current_prediction = f"{predicted_class_name.upper()} ({confidence:.2f})"
-
+            norm_kp = normalize_to_relative(filled_kp, anchor)
             self._draw_visualization(display_frame, raw_kp, conf, box)
-        else:
-            self.buffer.clear()
-            self.current_prediction = "No Person Detected"
 
-        label_color = (0, 255, 255)  # 노란색으로 통일
+        self.buffer.append(norm_kp)
 
-        cv2.putText(display_frame, f"Prediction: {self.current_prediction}", (10, 20),
+        # 버퍼가 30개로 꽉 찼을 때만 예측을 수행
+        if len(self.buffer) == self.seq_length:
+            # --- converter.py와 동일한 특징 공학 로직 ---
+            # 위치 데이터 (30, 34)
+            pos_seq = np.array(self.buffer)
+
+            # 속도 데이터 (29, 34)
+            vel_seq = np.diff(pos_seq, axis=0)
+
+            # 가속도 데이터 (28, 34)
+            acc_seq = np.diff(vel_seq, axis=0)
+
+            # 길이를 맞추기 위해 패딩 추가
+            vel_seq_padded = np.pad(vel_seq, ((1, 0), (0, 0)), 'constant')
+            acc_seq_padded = np.pad(acc_seq, ((2, 0), (0, 0)), 'constant')
+
+            # 모든 특징을 결합하여 (30, 102) 형태로 만듦
+            full_feature_seq = np.concatenate((pos_seq, vel_seq_padded, acc_seq_padded), axis=1)
+            # -----------------------------------------
+
+            # 모델 입력 형태에 맞게 reshape: (1, 30, 102)
+            input_data = np.expand_dims(full_feature_seq, axis=0)
+
+            prediction_probs = self.lstm_model.predict(input_data, verbose=0)[0]
+            top_3_indices = np.argsort(prediction_probs)[::-1][:3]
+
+            top_predictions = []
+            for i in top_3_indices:
+                class_name = f"Class #{i}"
+                if self.class_names and i < len(self.class_names):
+                    class_name = self.class_names[i]
+                confidence = prediction_probs[i]
+                top_predictions.append(f"{class_name.upper()}: {confidence:.0%}")
+
+            self.current_prediction = "\n".join(top_predictions)
+
+        # 예측 텍스트를 이미지에 오버레이
+        first_line_prediction = self.current_prediction.split('\n')[0]
+        label_color = (0, 255, 255)
+
+        cv2.putText(display_frame, f"Prediction: {first_line_prediction}", (10, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, label_color, 2, cv2.LINE_AA)
 
         return self.current_prediction, display_frame

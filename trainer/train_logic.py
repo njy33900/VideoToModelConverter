@@ -48,7 +48,16 @@ class ModelTrainer:
             y_integers, class_names = pd.factorize(df['label'])
             num_classes = len(class_names)
             y_cat = to_categorical(y_integers, num_classes=num_classes)
-            X = X.reshape(X.shape[0], 30, 34)
+
+            num_samples = X.shape[0]
+            num_timesteps = 30
+            num_features_per_step = 102  # 34 (pos) + 34 (vel) + 34 (acc)
+
+            expected_features = num_timesteps * num_features_per_step
+            if X.shape[1] != expected_features:
+                raise ValueError(f"CSV 데이터의 특징 수가 올바르지 않습니다! 예상: {expected_features}, 실제: {X.shape[1]}")
+
+            X = X.reshape(num_samples, num_timesteps, num_features_per_step)
 
             # 데이터 증강
             print("✨ 데이터 증강 적용 중 (Noise Injection)...")
@@ -71,13 +80,15 @@ class ModelTrainer:
 
             # 모델 구성
             model = Sequential([
-                Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=l2(0.001)), input_shape=(30, 34)),
+                Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=l2(0.001)),
+                              input_shape=(num_timesteps, num_features_per_step)),
                 Dropout(0.4),
                 Bidirectional(LSTM(32, return_sequences=False, kernel_regularizer=l2(0.001))),
                 Dropout(0.4),
                 Dense(32, activation='relu', kernel_regularizer=l2(0.001)),
                 Dense(num_classes, activation='softmax')
             ])
+
             model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
             model.summary()
 
@@ -96,7 +107,7 @@ class ModelTrainer:
                 verbose=0
             )
 
-            # 결과 저장 로직
+            # 결과 저장
             timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
             model_basename = f"lstm_model_{timestamp}"
 
@@ -134,6 +145,7 @@ class ModelTrainer:
             plot_save_path = os.path.join(self.results_save_dir, f"{report_basename}.png")
             self._plot_results(history, y_true, y_pred, class_names, plot_save_path)
 
+            # 최종 메시지 반환
             stopped_epoch = early_stopping.stopped_epoch
             epoch_msg = f"(조기종료: {stopped_epoch + 1}/{epochs})" if stopped_epoch > 0 else f"({epochs}회 완료)"
             return True, f"학습 완료! {epoch_msg}\n검증 정확도: {final_acc:.4f}\n저장됨: {model_save_path}"
