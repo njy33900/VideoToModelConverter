@@ -3,7 +3,7 @@ cd /d "%~dp0"
 
 git fetch origin
 
-git checkout Converter_v1
+git checkout Converter_v2
 
 git pull
 

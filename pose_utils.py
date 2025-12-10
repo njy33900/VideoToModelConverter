@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 from typing import Optional
 
 
@@ -85,3 +86,29 @@ def normalize_to_relative(
 
     normalized = keypoints - anchor
     return normalized.flatten()
+
+def letterbox_resize(image: np.ndarray, new_shape: tuple = (320, 240), color: tuple = (0, 0, 0)) -> np.ndarray:
+    """
+    원본 이미지의 가로세로 비율을 유지하면서 리사이즈하고, 남는 공간은 패딩으로 채웁니다.
+    """
+    shape = image.shape[:2]  # 현재 이미지 모양 [높이, 너비]
+    new_w, new_h = new_shape
+
+    # 스케일 비율 계산
+    r = min(new_h / shape[0], new_w / shape[1])
+
+    # 새로운 이미지 크기 계산
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = (new_w - new_unpad[0]) / 2, (new_h - new_unpad[1]) / 2
+
+    # 비율을 유지하며 리사이즈
+    if shape[::-1] != new_unpad:
+        image = cv2.resize(image, new_unpad, interpolation=cv2.INTER_LINEAR)
+
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+
+    # 패딩 추가
+    image = cv2.copyMakeBorder(image, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+
+    return image
