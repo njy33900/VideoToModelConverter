@@ -8,8 +8,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.utils import class_weight
 from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, Input, Attention
 from tensorflow.keras.callbacks import Callback, EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
 import datetime
@@ -38,11 +38,18 @@ class ModelTrainer:
         os.makedirs(self.model_save_dir, exist_ok=True)
         os.makedirs(self.results_save_dir, exist_ok=True)
 
-    def train_model(self, csv_path, epochs=50, batch_size=32, progress_callback=None):
+    def train_model(self, csv_paths: list, epochs=50, batch_size=32, progress_callback=None):
         try:
+            print(f"DEBUG: {len(csv_paths)}개의 CSV 파일 로딩 중...")
+            df_list = []
+            for path in csv_paths:
+                print(f"  - 로딩: {os.path.basename(path)}")
+                df_list.append(pd.read_csv(path))
+
+            df = pd.concat(df_list, ignore_index=True)
+            print(f"✅ 총 {len(df)}개의 데이터 로드 완료.")
+
             # 데이터 로딩 및 전처리
-            print(f"DEBUG: 데이터 로딩 중... {csv_path}")
-            df = pd.read_csv(csv_path)
             feature_cols = [c for c in df.columns if c.startswith('v')]
             X = df[feature_cols].values
             y_integers, class_names = pd.factorize(df['label'])
@@ -130,8 +137,10 @@ class ModelTrainer:
             with open(report_txt_path, 'w', encoding='utf-8') as f:
                 f.write(f"Training Report - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("=" * 60 + "\n")
-                f.write(f"Source CSV: {os.path.basename(csv_path)}\n")
-                f.write(f"Saved Model: {os.path.basename(model_save_path)}\n")
+                f.write(f"Source CSVs ({len(csv_paths)} files):\n")
+                for path in csv_paths:
+                    f.write(f"  - {os.path.basename(path)}\n")
+                f.write(f"\nSaved Model: {os.path.basename(model_save_path)}\n")
                 f.write("\n--- Final Evaluation ---\n")
                 f.write(f"Validation Loss: {loss:.4f}\n")
                 f.write(f"Validation Accuracy: {final_acc:.4f}\n")

@@ -9,9 +9,20 @@ import threading
 import time
 from typing import List, Dict, Any, Tuple
 from collections import deque
+import numpy as np
 
 from pose_utils import *
 
+# 단일 대상 관성 추적
+def iou(boxA, boxB):
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+    interArea = max(0, xB - xA) * max(0, yB - yA)
+    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+    return interArea / float(boxAArea + boxBArea - interArea)
 
 class VideoConverter:
     """
@@ -113,8 +124,13 @@ class VideoConverter:
             total_progress: float,
             progress_callback=None
     ) -> None:
+        """
+        2초 미만 필터링 + 2~3초 리샘플링 + 3초 이상 슬라이딩 윈도우
+        """
         cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened(): return
+        if not cap.isOpened():
+            print(f"경고: '{video_path}' 파일을 열 수 없습니다.")
+            return
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -125,6 +141,14 @@ class VideoConverter:
         frame_idx = 0
         position_buffer = deque(maxlen=self.seq_length)
         last_valid_pose = np.zeros((17, 2))
+
+        data_generated_for_this_video = False
+
+        SLIDING_STRIDE = 5
+        frames_since_last_save = SLIDING_STRIDE
+
+        # 최소 길이 임계값 설정, 2초 미만 데이터는 버리고, 2초 이상은 프레임 보간
+        MIN_SAMPLES_FOR_RESAMPLING = 20  # 2초 (20개 샘플)
 
         while not self.stop_event.is_set():
             while self.pause_event.is_set():
@@ -160,47 +184,47 @@ class VideoConverter:
                 self._draw_visualization(display_frame, raw_kp, conf, box)
 
             position_buffer.append(norm_kp)
+            frames_since_last_save += 1
 
-            # 모든 프레임에서 데이터를 생성합니다.
             if len(position_buffer) == self.seq_length:
-                pos_seq = np.array(position_buffer)
-                vel_seq = np.diff(pos_seq, axis=0)
-                acc_seq = np.diff(vel_seq, axis=0)
+                if frames_since_last_save >= SLIDING_STRIDE:
+                    pos_seq = np.array(position_buffer)
+                    vel_seq = np.diff(pos_seq, axis=0)
+                    acc_seq = np.diff(vel_seq, axis=0)
 
-                vel_seq_padded = np.pad(vel_seq, ((1, 0), (0, 0)), 'constant')
-                acc_seq_padded = np.pad(acc_seq, ((2, 0), (0, 0)), 'constant')
+                    vel_seq_padded = np.pad(vel_seq, ((1, 0), (0, 0)), 'constant')
+                    acc_seq_padded = np.pad(acc_seq, ((2, 0), (0, 0)), 'constant')
 
-                full_feature_seq = np.concatenate((pos_seq, vel_seq_padded, acc_seq_padded), axis=1)
-                flat = full_feature_seq.flatten().tolist()
+                    full_feature_seq = np.concatenate((pos_seq, vel_seq_padded, acc_seq_padded), axis=1)
+                    flat = full_feature_seq.flatten().tolist()
 
-                flat.append(label)
-                flat.append(filename)
+                    flat.append(label)
+                    flat.append(filename)
 
-                end_frame = frame_idx
-                start_frame = max(0, end_frame - (self.seq_length * frame_step))
-                flat.append(f"{start_frame}~{end_frame}")
+                    end_frame = frame_idx
+                    start_frame = max(0, end_frame - (self.seq_length * frame_step))
+                    flat.append(f"{start_frame}~{end_frame}")
 
-                end_sec, start_sec = end_frame / fps, start_frame / fps
-                time_str = f"{int(start_sec // 60):02d}:{int(start_sec % 60):02d}-{int(end_sec // 60):02d}:{int(end_sec % 60):02d}"
-                flat.append(time_str)
-                data_storage.append(flat)
+                    end_sec, start_sec = end_frame / fps, start_frame / fps
+                    time_str = f"{int(start_sec // 60):02d}:{int(start_sec % 60):02d}-{int(end_sec // 60):02d}:{int(end_sec % 60):02d}"
+                    flat.append(time_str)
+                    data_storage.append(flat)
 
-                cv2.circle(display_frame, (self.resize_dims[0] - 20, 20), 8, (0, 0, 255), -1)
+                    cv2.circle(display_frame, (self.resize_dims[0] - 20, 20), 8, (0, 0, 255), -1)
+
+                    data_generated_for_this_video = True
+                    frames_since_last_save = 0
 
             file_progress = (frame_idx / total_frames) * 100 if total_frames > 0 else 0
             if progress_callback:
                 progress_callback(os.path.basename(video_path), file_progress, total_progress)
 
-            # 진행상황 오버레이
             cv2.putText(display_frame, f"File: {filename}", (5, 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-
             cv2.putText(display_frame, f"File Progress: {file_progress:.1f}%", (5, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-
             cv2.putText(display_frame, f"Total Progress: {total_progress:.1f}%", (5, 45),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-
             cv2.putText(display_frame, f"Class: {label.upper()}", (5, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
 
@@ -208,6 +232,42 @@ class VideoConverter:
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 self.stop_event.set()
                 break
+
+        # 영상 처리 완료 후, 하이브리드 로직
+        if not data_generated_for_this_video and len(position_buffer) > 0:
+
+            if len(position_buffer) >= MIN_SAMPLES_FOR_RESAMPLING:
+                print(f"  -> 영상이 짧아 리샘플링을 적용합니다. ({len(position_buffer)} -> {self.seq_length} 프레임)")
+
+                original_sequence = np.array(position_buffer)
+                original_len = len(original_sequence)
+                target_len = self.seq_length
+
+                original_x = np.linspace(0, 1, original_len)
+                target_x = np.linspace(0, 1, target_len)
+
+                resampled_sequence = np.zeros((target_len, 34))
+                for i in range(34):
+                    resampled_sequence[:, i] = np.interp(target_x, original_x, original_sequence[:, i])
+
+                pos_seq = resampled_sequence
+                vel_seq = np.diff(pos_seq, axis=0)
+                acc_seq = np.diff(vel_seq, axis=0)
+                vel_seq_padded = np.pad(vel_seq, ((1, 0), (0, 0)), 'constant')
+                acc_seq_padded = np.pad(acc_seq, ((2, 0), (0, 0)), 'constant')
+                full_feature_seq = np.concatenate((pos_seq, vel_seq_padded, acc_seq_padded), axis=1)
+                flat = full_feature_seq.flatten().tolist()
+
+                flat.append(label)
+                flat.append(filename)
+                flat.append(f"0~{total_frames} (Resampled)")
+                end_sec = total_frames / fps
+                time_str = f"00:00-{int(end_sec // 60):02d}:{int(end_sec % 60):02d}"
+                flat.append(time_str)
+                data_storage.append(flat)
+
+            else:
+                print(f"  -> 영상이 너무 짧아({len(position_buffer)} < {MIN_SAMPLES_FOR_RESAMPLING} 샘플) 데이터 생성에서 제외합니다.")
 
         cap.release()
 

@@ -89,7 +89,7 @@ def normalize_to_relative(
 
 def letterbox_resize(image: np.ndarray, new_shape: tuple = (320, 240), color: tuple = (0, 0, 0)) -> np.ndarray:
     """
-    원본 이미지의 가로세로 비율을 유지하면서 리사이즈하고, 남는 공간은 패딩으로 채웁니다.
+    원본 이미지의 가로세로 비율을 유지하면서 리사이즈하고, 남는 공간은 패딩으로 채움
     """
     shape = image.shape[:2]  # 현재 이미지 모양 [높이, 너비]
     new_w, new_h = new_shape

@@ -79,7 +79,7 @@ class MainGUI:
 
         # 초기 로딩
         self._load_models_combo()
-        self._load_csv_list()
+        # self._load_csv_list()
         self._load_h5_models_combo()
 
         # 창 닫기 이벤트 바인딩
@@ -167,18 +167,32 @@ class MainGUI:
     def _init_trainer_tab(self, parent):
         paned = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        left_frame = ttk.LabelFrame(paned, text="📊 학습 데이터셋 (CSV) 목록")
+
+        # 좌측 창: CSV 목록
+        left_frame = ttk.LabelFrame(paned, text="📊 학습 데이터셋(CSV) 목록")
         paned.add(left_frame, weight=1)
-        self.tree_csv = ttk.Treeview(left_frame, columns=("filename", "size", "date"), show="headings")
-        self.tree_csv.heading("filename", text="파일명")
-        self.tree_csv.heading("size", text="크기")
-        self.tree_csv.heading("date", text="수정일")
-        self.tree_csv.column("filename", width=250)
-        self.tree_csv.column("size", width=80, anchor="center")
-        self.tree_csv.column("date", width=120, anchor="center")
-        self.tree_csv.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        btn_csv_refresh = ttk.Button(left_frame, text="목록 새로고침", command=self._load_csv_list)
-        btn_csv_refresh.pack(fill=tk.X, padx=5, pady=5)
+
+        # 폴더 선택 UI
+        folder_frame = tk.Frame(left_frame)
+        folder_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.csv_source_path = tk.StringVar(value="CSV 폴더를 선택해주세요.")
+        lbl_csv_path = tk.Label(folder_frame, textvariable=self.csv_source_path, anchor='w')
+        lbl_csv_path.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        btn_browse_csv = ttk.Button(folder_frame, text="폴더 선택", command=self._browse_csv_folder)
+        btn_browse_csv.pack(side=tk.RIGHT)
+
+        # CSV 파일 목록 Treeview
+        scrollbar = ttk.Scrollbar(left_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree_csv_scan = ttk.Treeview(left_frame, columns=("filename", "size"), show="headings", yscrollcommand=scrollbar.set)
+        self.tree_csv_scan.heading("filename", text="파일명")
+        self.tree_csv_scan.heading("size", text="크기")
+        self.tree_csv_scan.column("filename", width=200)
+        self.tree_csv_scan.column("size", width=80, anchor='center')
+        self.tree_csv_scan.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        scrollbar.config(command=self.tree_csv_scan.yview)
+
+        # 우측 창: 학습 제어
         right_frame = tk.Frame(paned)
         paned.add(right_frame, weight=1)
         setting_frame = ttk.LabelFrame(right_frame, text="학습 파라미터")
@@ -195,11 +209,26 @@ class MainGUI:
         ctrl_frame.pack(fill=tk.BOTH, expand=True, pady=10, padx=10)
         self.train_progress = tk.DoubleVar()
         ttk.Progressbar(ctrl_frame, variable=self.train_progress, maximum=100).pack(fill=tk.X, padx=10, pady=20)
-        self.lbl_train_status = tk.Label(ctrl_frame, text="CSV를 선택하고 학습을 시작하세요.", fg="gray", font=("Arial", 11))
+        self.lbl_train_status = tk.Label(ctrl_frame, text="CSV 폴더를 선택하고 학습을 시작하세요.", fg="gray", font=("Arial", 11))
         self.lbl_train_status.pack(pady=10)
         self.btn_train_start = tk.Button(ctrl_frame, text="🚀 학습 시작", bg="#ccffcc", font=("Arial", 14, "bold"), height=2,
                                          command=self.start_training)
         self.btn_train_start.pack(fill=tk.X, padx=20, pady=10)
+
+    def _browse_csv_folder(self):
+        if self.is_training: return
+        folder_selected = filedialog.askdirectory(title="학습할 CSV 파일이 담긴 폴더를 선택하세요")
+        if folder_selected:
+            self.csv_source_path.set(folder_selected)
+            # 기존 목록 지우기
+            for item in self.tree_csv_scan.get_children():
+                self.tree_csv_scan.delete(item)
+            # CSV 파일 스캔하여 Treeview에 추가
+            csv_files = glob.glob(os.path.join(folder_selected, "*.csv"))
+            for f_path in sorted(csv_files):
+                fname = os.path.basename(f_path)
+                size = f"{os.path.getsize(f_path) / (1024 * 1024):.1f} MB"
+                self.tree_csv_scan.insert("", "end", values=(fname, size))
 
     def _init_tester_tab(self, parent):
         # PanedWindow를 사용하여 좌/우 분할 레이아웃 생성
@@ -207,7 +236,7 @@ class MainGUI:
         paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         left_container = tk.Frame(paned, width=300)
-        paned.add(left_container, weight=1)  # [핵심] PanedWindow에 좌측 창 추가
+        paned.add(left_container, weight=1)
 
 
         # 모델 선택
@@ -403,23 +432,47 @@ class MainGUI:
 
     def _finish_conversion(self, dataset):
         if dataset:
-            if not os.path.exists(self.save_root): os.makedirs(self.save_root)
-            ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-            path = os.path.join(self.save_root, f"pose_data_{ts}.csv")
+            chunk_size_mb = 200
+            bytes_per_row = 30 * 102 * 10
+            rows_per_chunk = int((chunk_size_mb * 1024 * 1024) / bytes_per_row)
 
-            # 30 프레임 * (34 위치 + 34 속도 + 34 가속도) = 30 * 102 = 3060
-            num_features = self.converter.seq_length * 34 * 3
-            cols = [f'v{i}' for i in range(num_features)] + ['label', 'filename', 'frame', 'time']
-
-            # 데이터 행의 길이와 컬럼 수가 일치하는지 확인
-            if len(dataset[0]) != len(cols):
-                messagebox.showerror("오류", f"데이터와 컬럼의 길이가 일치하지 않습니다!\n데이터: {len(dataset[0])}, 컬럼: {len(cols)}")
+            num_rows = len(dataset)
+            # 데이터가 없을 경우 처리
+            if num_rows == 0:
+                messagebox.showinfo("정보", "변환된 데이터가 없습니다.")
                 self._reset_conv_ui()
                 return
 
-            pd.DataFrame(dataset, columns=cols).to_csv(path, index=False)
-            messagebox.showinfo("완료", f"저장됨:\n{path}")
-            self._load_csv_list()
+            num_chunks = (num_rows // rows_per_chunk) + (1 if num_rows % rows_per_chunk > 0 else 0)
+
+            # 타임스탬프 기반으로 새로운 하위 폴더 경로 생성
+            ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            folder_name = f"pose_data_{ts}"
+            save_folder_path = os.path.join(self.save_root, folder_name)
+
+            # 실제로 하위 폴더를 생성
+            os.makedirs(save_folder_path, exist_ok=True)
+
+            # 컬럼 헤더 정의
+            cols = [f'v{i}' for i in range(self.converter.seq_length * 102)] + ['label', 'filename', 'frame', 'time']
+
+            saved_files_info = []
+            for i in range(num_chunks):
+                start_idx = i * rows_per_chunk
+                end_idx = start_idx + rows_per_chunk
+                chunk_data = dataset[start_idx:end_idx]
+
+                # 분할된 파일 이름은 단순하게 part_N.csv로 지정
+                chunk_filename = f"part_{i + 1}.csv"
+                chunk_path = os.path.join(save_folder_path, chunk_filename)
+
+                df_chunk = pd.DataFrame(chunk_data, columns=cols)
+                df_chunk.to_csv(chunk_path, index=False)
+                saved_files_info.append(chunk_filename)
+                print(f"Saved chunk {i + 1}/{num_chunks}: {chunk_path}")
+
+            messagebox.showinfo("완료", f"{num_chunks}개의 파일이 다음 폴더에 저장되었습니다:\n{save_folder_path}")
+
         self._reset_conv_ui()
 
     def _reset_conv_ui(self):
@@ -432,18 +485,25 @@ class MainGUI:
         self.lbl_conv_status.config(text="대기 중")
 
     def start_training(self):
-        sel = self.tree_csv.selection()
-        if not sel: return messagebox.showwarning("경고", "CSV 선택 필요")
-        filename = self.tree_csv.item(sel[0])['values'][0]
-        csv_path = os.path.join(self.save_root, filename)
+        csv_folder = self.csv_source_path.get()
+        if not os.path.isdir(csv_folder):
+            return messagebox.showwarning("경고", "학습할 CSV 파일이 담긴 폴더를 선택해주세요.")
+
+        csv_paths = glob.glob(os.path.join(csv_folder, "*.csv"))
+        if not csv_paths:
+            return messagebox.showwarning("경고", "선택된 폴더에 CSV 파일이 없습니다.")
+
         try:
-            epochs, batch = int(self.ent_epochs.get()), int(self.ent_batch.get())
+            epochs = int(self.ent_epochs.get())
+            batch = int(self.ent_batch.get())
         except ValueError:
-            return messagebox.showerror("오류", "숫자만 입력하세요")
+            return messagebox.showerror("오류", "Epochs와 Batch Size는 숫자만 입력하세요.")
+
         self.is_training = True
         self.btn_train_start.config(state="disabled", text="🔥 학습 진행 중...", bg="#f1f3f4")
-        self.tree_csv.config(selectmode="none")
-        threading.Thread(target=self._run_training, args=(csv_path, epochs, batch), daemon=True).start()
+
+        # 단일 경로가 아닌, 파일 경로 리스트(list)를 전달
+        threading.Thread(target=self._run_training, args=(csv_paths, epochs, batch), daemon=True).start()
 
     def _run_training(self, csv_path, epochs, batch):
         def progress_cb(epoch, logs):
