@@ -9,7 +9,7 @@ import json
 
 # 기존 유틸리티 재사용
 from pose_utils import fill_missing_keypoints, get_stable_anchor, normalize_to_relative, letterbox_resize
-
+from trainer.train_logic_transformer import PositionalEncoding
 
 class VideoTester:
     """
@@ -42,8 +42,18 @@ class VideoTester:
         if self.device == '0':
             self.yolo_model.to('cuda')
 
-        print(f"Loading LSTM model: {lstm_model_path}")
-        self.lstm_model = tf.keras.models.load_model(lstm_model_path)
+        # LSTM/Transformer 모델 로딩
+        print(f"Loading Keras model: {lstm_model_path}")
+        try:
+            # Transformer우선
+            custom_objects = {'PositionalEncoding': PositionalEncoding}
+            self.lstm_model = tf.keras.models.load_model(lstm_model_path, custom_objects=custom_objects)
+            print("  - Successfully loaded as a Transformer model with custom layer.")
+        except ValueError:
+            # Transformer가 아닌 경우, LSTM로딩 시도
+            print("  - Failed to load with custom objects. Retrying as a standard LSTM model...")
+            self.lstm_model = tf.keras.models.load_model(lstm_model_path)
+            print("  - Successfully loaded as a standard LSTM model.")
 
         self.class_names = []
         class_map_path = lstm_model_path.replace('.h5', '_classes.json')

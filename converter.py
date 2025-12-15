@@ -144,7 +144,7 @@ class VideoConverter:
 
         data_generated_for_this_video = False
 
-        SLIDING_STRIDE = 5
+        SLIDING_STRIDE = 2
         frames_since_last_save = SLIDING_STRIDE
 
         # 최소 길이 임계값 설정, 2초 미만 데이터는 버리고, 2초 이상은 프레임 보간

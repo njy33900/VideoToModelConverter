@@ -8,18 +8,72 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.utils import class_weight
 from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, Input, Attention
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import (Input, Dense, Dropout, LayerNormalization, MultiHeadAttention,
+                                     GlobalAveragePooling1D, Add)
 from tensorflow.keras.callbacks import Callback, EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
+from tensorflow.keras.utils import to_categorical, register_keras_serializable
+
 import datetime
 import json
 import traceback
 
-# 한글 폰트 설정 (Windows 기준)
 plt.rc('font', family='Malgun Gothic')
 plt.rcParams['axes.unicode_minus'] = False
 
+@register_keras_serializable()
+class PositionalEncoding(tf.keras.layers.Layer):
+    """
+    입력 시퀀스에 위치 정보를 추가하는 레이어.
+    """
+    def __init__(self, position, d_model, **kwargs):
+        super(PositionalEncoding, self).__init__(**kwargs)
+        self.position = position
+        self.d_model = d_model
+        self.pos_encoding = self.positional_encoding(position, d_model)
+
+    def get_angles(self, position, i, d_model):
+        angles = 1 / tf.pow(10000, (2 * (i // 2)) / tf.cast(d_model, tf.float32))
+        return position * angles
+
+    def positional_encoding(self, position, d_model):
+        angle_rads = self.get_angles(
+            position=tf.range(position, dtype=tf.float32)[:, tf.newaxis],
+            i=tf.range(d_model, dtype=tf.float32)[tf.newaxis, :],
+            d_model=d_model
+        )
+        sines = tf.math.sin(angle_rads[:, 0::2])
+        cosines = tf.math.cos(angle_rads[:, 1::2])
+        pos_encoding = tf.concat([sines, cosines], axis=-1)
+        pos_encoding = pos_encoding[tf.newaxis, ...]
+        return tf.cast(pos_encoding, tf.float32)
+
+    def call(self, inputs):
+        return inputs + self.pos_encoding[:, :tf.shape(inputs)[1], :]
+
+    def get_config(self):
+        config = super(PositionalEncoding, self).get_config()
+        config.update({
+            "position": self.position,
+            "d_model": self.d_model,
+        })
+        return config
+
+
+def transformer_encoder_block(inputs, head_size, num_heads, ff_dim, dropout=0):
+    # Multi-Head Attention
+    x = LayerNormalization(epsilon=1e-6)(inputs)
+    x = MultiHeadAttention(key_dim=head_size, num_heads=num_heads, dropout=dropout)(x, x)
+    x = Dropout(dropout)(x)
+    res = Add()([x, inputs])
+
+    # Feed Forward Network
+    x = LayerNormalization(epsilon=1e-6)(res)
+    x = Dense(ff_dim, activation="relu")(x)
+    x = Dropout(dropout)(x)
+    x = Dense(inputs.shape[-1])(x)
+    return Add()([x, res])
 
 class TrainingCallback(Callback):
     def __init__(self, progress_callback):
@@ -27,11 +81,11 @@ class TrainingCallback(Callback):
         self.progress_callback = progress_callback
 
     def on_epoch_end(self, epoch, logs=None):
-        if self.progress_callback:
-            self.progress_callback(epoch + 1, logs)
+        if self.progress_callback: self.progress_callback(epoch + 1, logs)
 
 
-class ModelTrainer:
+# TransformerTrainer 클래스
+class TransformerTrainer:
     def __init__(self):
         self.model_save_dir = os.path.join("trainer", "models")
         self.results_save_dir = os.path.join("trainer", "results")
@@ -40,82 +94,67 @@ class ModelTrainer:
 
     def train_model(self, csv_paths: list, epochs=50, batch_size=32, progress_callback=None):
         try:
-            print(f"DEBUG: {len(csv_paths)}개의 CSV 파일 로딩 중...")
-            df_list = []
-            for path in csv_paths:
-                print(f"  - 로딩: {os.path.basename(path)}")
-                df_list.append(pd.read_csv(path))
-
-            df = pd.concat(df_list, ignore_index=True)
-            print(f"✅ 총 {len(df)}개의 데이터 로드 완료.")
-
             # 데이터 로딩 및 전처리
+            df_list = [pd.read_csv(path) for path in csv_paths]
+            df = pd.concat(df_list, ignore_index=True)
+
             feature_cols = [c for c in df.columns if c.startswith('v')]
             X = df[feature_cols].values
             y_integers, class_names = pd.factorize(df['label'])
             num_classes = len(class_names)
             y_cat = to_categorical(y_integers, num_classes=num_classes)
 
-            num_samples = X.shape[0]
-            num_timesteps = 30
-            num_features_per_step = 102  # 34 (pos) + 34 (vel) + 34 (acc)
+            num_samples, num_timesteps, num_features = X.shape[0], 30, 102
+            X = X.reshape(num_samples, num_timesteps, num_features)
 
-            expected_features = num_timesteps * num_features_per_step
-            if X.shape[1] != expected_features:
-                raise ValueError(f"CSV 데이터의 특징 수가 올바르지 않습니다! 예상: {expected_features}, 실제: {X.shape[1]}")
-
-            X = X.reshape(num_samples, num_timesteps, num_features_per_step)
-
-            # 데이터 증강
-            print("✨ 데이터 증강 적용 중 (Noise Injection)...")
+            # 데이터 증강 (단순 노이즈 증강만 사용)
             noise = np.random.normal(0, 0.01, X.shape)
             X_noisy = X + noise
             X_final = np.concatenate((X, X_noisy), axis=0)
             y_final = np.concatenate((y_cat, y_cat), axis=0)
             X_train, X_val, y_train, y_val = train_test_split(X_final, y_final, test_size=0.2, random_state=42)
-            print(f"✅ 증강 완료: {len(X)} -> {len(X_final)} 샘플")
 
-            # 클래스 가중치 계산
+            # 클래스 가중치 계산 (기존과 동일)
             y_train_integers = np.argmax(y_train, axis=1)
-            class_weights = class_weight.compute_class_weight(
-                class_weight='balanced',
-                classes=np.unique(y_train_integers),
-                y=y_train_integers
-            )
+            class_weights = class_weight.compute_class_weight('balanced', classes=np.unique(y_train_integers),
+                                                              y=y_train_integers)
             class_weights_dict = dict(enumerate(class_weights))
-            print(f"⚖️ 클래스 가중치 적용: {class_weights_dict}")
 
-            # 모델 구성
-            model = Sequential([
-                Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=l2(0.001)),
-                              input_shape=(num_timesteps, num_features_per_step)),
-                Dropout(0.4),
-                Bidirectional(LSTM(32, return_sequences=False, kernel_regularizer=l2(0.001))),
-                Dropout(0.4),
-                Dense(32, activation='relu', kernel_regularizer=l2(0.001)),
-                Dense(num_classes, activation='softmax')
-            ])
+            # 트랜스포머 모델 구성
+            input_layer = Input(shape=(num_timesteps, num_features))
+
+            # 포지셔널 인코딩 추가
+            x = PositionalEncoding(position=num_timesteps, d_model=num_features)(input_layer)
+
+            # 여러 개의 트랜스포머 블록을 쌓음
+            for _ in range(2):  # 2-layer Transformer
+                x = transformer_encoder_block(x, head_size=128, num_heads=4, ff_dim=128, dropout=0.1)
+
+            # 최종 분류
+            x = GlobalAveragePooling1D(data_format="channels_last")(x)
+            x = Dropout(0.4)(x)
+            x = Dense(64, activation="relu")(x)
+            output_layer = Dense(num_classes, activation="softmax")(x)
+
+            model = Model(inputs=input_layer, outputs=output_layer)
 
             model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
             model.summary()
 
-            # 콜백 및 학습 실행
-            early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=1)
-            reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, verbose=1)
+            # 콜백 및 학습 실행 (기존과 동일)
+            early_stopping = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True,
+                                           verbose=1)  # patience 증가
+            reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=7, verbose=1)  # patience 증가
             my_callbacks = [TrainingCallback(progress_callback), early_stopping, reduce_lr]
 
             history = model.fit(
-                X_train, y_train,
-                epochs=epochs,
-                batch_size=batch_size,
-                validation_data=(X_val, y_val),
-                callbacks=my_callbacks,
-                class_weight=class_weights_dict,
-                verbose=0
+                X_train, y_train, epochs=epochs, batch_size=batch_size,
+                validation_data=(X_val, y_val), callbacks=my_callbacks,
+                class_weight=class_weights_dict, verbose=0
             )
 
-            # 결과 저장
-            architecture = "LSTM"
+            # 결과 저장 및 반환
+            architecture = "Transformer"
             timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
             model_basename = f"{architecture}_model_{timestamp}"
 
@@ -158,7 +197,7 @@ class ModelTrainer:
             # 최종 메시지 반환
             stopped_epoch = early_stopping.stopped_epoch
             epoch_msg = f"(조기종료: {stopped_epoch + 1}/{epochs})" if stopped_epoch > 0 else f"({epochs}회 완료)"
-            return True, f"학습 완료! {epoch_msg}\n검증 정확도: {final_acc:.4f}\n저장됨: {model_save_path}"
+            return True, f"학습 완료! ... (Transformer)\n저장됨: {model_save_path}"
 
         except Exception as e:
             traceback.print_exc()

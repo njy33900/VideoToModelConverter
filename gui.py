@@ -16,6 +16,7 @@ import traceback
 # 모듈 임포트
 from converter import VideoConverter
 from trainer.train_logic import ModelTrainer
+from trainer.train_logic_transformer import TransformerTrainer
 from tester import VideoTester
 import tensorflow as tf
 
@@ -54,7 +55,8 @@ class MainGUI:
 
         # 인스턴스
         self.converter = None
-        self.trainer = ModelTrainer()
+        # self.trainer = ModelTrainer()
+        self.current_trainer = None
         self.tester = None
 
         self.is_converting = False
@@ -195,16 +197,26 @@ class MainGUI:
         # 우측 창: 학습 제어
         right_frame = tk.Frame(paned)
         paned.add(right_frame, weight=1)
+
         setting_frame = ttk.LabelFrame(right_frame, text="학습 파라미터")
         setting_frame.pack(fill=tk.X, pady=10, padx=10)
-        tk.Label(setting_frame, text="Epochs (반복 횟수):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+        tk.Label(setting_frame, text="학습 엔진:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.combo_trainer_engine = ttk.Combobox(setting_frame, state="readonly",
+                                                 values=['LSTM', 'Transformer'])
+        self.combo_trainer_engine.current(0)
+        self.combo_trainer_engine.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+        tk.Label(setting_frame, text="Epochs (반복 횟수):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
         self.ent_epochs = ttk.Entry(setting_frame)
-        self.ent_epochs.insert(0, "50")
-        self.ent_epochs.grid(row=0, column=1, padx=5, pady=5)
-        tk.Label(setting_frame, text="Batch Size (배치 크기):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.ent_epochs.insert(0, "100") # Epoch 기본값 증가
+        self.ent_epochs.grid(row=1, column=1, padx=5, pady=5)
+
+        tk.Label(setting_frame, text="Batch Size (배치 크기):").grid(row=2, column=0, padx=5, pady=5, sticky="w")
         self.ent_batch = ttk.Entry(setting_frame)
         self.ent_batch.insert(0, "32")
-        self.ent_batch.grid(row=1, column=1, padx=5, pady=5)
+        self.ent_batch.grid(row=2, column=1, padx=5, pady=5)
+
         ctrl_frame = ttk.LabelFrame(right_frame, text="학습 제어")
         ctrl_frame.pack(fill=tk.BOTH, expand=True, pady=10, padx=10)
         self.train_progress = tk.DoubleVar()
@@ -499,6 +511,16 @@ class MainGUI:
         except ValueError:
             return messagebox.showerror("오류", "Epochs와 Batch Size는 숫자만 입력하세요.")
 
+        selected_engine = self.combo_trainer_engine.get()
+
+        print(f"선택된 학습 엔진: {selected_engine}")
+        if "LSTM" in selected_engine:
+            self.current_trainer = ModelTrainer()
+        elif "Transformer" in selected_engine:
+            self.current_trainer = TransformerTrainer()
+        else:
+            return messagebox.showerror("오류", "알 수 없는 학습 엔진입니다.")
+
         self.is_training = True
         self.btn_train_start.config(state="disabled", text="🔥 학습 진행 중...", bg="#f1f3f4")
 
@@ -514,8 +536,17 @@ class MainGUI:
             self.root.after(0, lambda: self.lbl_train_status.config(text=msg))
             print(f"[Train] {msg}")
 
+        '''
         success, msg = self.trainer.train_model(csv_path, epochs, batch, progress_callback=progress_cb)
         self.root.after(0, lambda: self._finish_training(success, msg))
+        '''
+        if self.current_trainer:
+            success, msg = self.current_trainer.train_model(
+                csv_path, epochs, batch, progress_callback=progress_cb
+            )
+            self.root.after(0, lambda: self._finish_training(success, msg))
+        else:
+            self.root.after(0, lambda: self._finish_training(False, "Trainer가 초기화되지 않았습니다."))
 
     def _finish_training(self, success, msg):
         self.is_training = False
