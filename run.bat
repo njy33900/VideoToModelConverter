@@ -3,10 +3,10 @@ cd /d "%~dp0"
 
 git fetch origin
 
-git checkout Converter_v2
+git checkout Converter_v4
 
 git pull
 
-start "" pythonw main.py
+start "" python main.py
 
 exit

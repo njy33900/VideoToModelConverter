@@ -1,15 +1,10 @@
-import cv2
-import numpy as np
-import pandas as pd
 from ultralytics import YOLO
 import os
 import torch
-import datetime
 import threading
 import time
-from typing import List, Dict, Any, Tuple
+from typing import List
 from collections import deque
-import numpy as np
 
 from pose_utils import *
 

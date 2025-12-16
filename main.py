@@ -1,3 +1,7 @@
+# 강제 gpu사용
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
 import tkinter as tk
 from gui import MainGUI
 
