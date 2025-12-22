@@ -9,24 +9,12 @@ import threading
 import time
 from typing import List, Dict, Any, Tuple
 from collections import deque
-import numpy as np
 
 from pose_utils import *
 
-# 단일 대상 관성 추적
-def iou(boxA, boxB):
-    xA = max(boxA[0], boxB[0])
-    yA = max(boxA[1], boxB[1])
-    xB = min(boxA[2], boxB[2])
-    yB = min(boxA[3], boxB[3])
-    interArea = max(0, xB - xA) * max(0, yB - yA)
-    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-    return interArea / float(boxAArea + boxBArea - interArea)
-
 class VideoConverter:
     """
-    비디오 파일을 읽어 YOLO Pose Estimation을 수행
+    비디오 파일을 읽어 YOLO Pose Estimation을 수행 (Tracking 적용)
     LSTM 학습을 위한 시계열 데이터셋(CSV)으로 변환하는 클래스
     """
 
@@ -40,7 +28,13 @@ class VideoConverter:
         """
         self.model_path = model_path
         self.seq_length = seq_length
-        self.resize_dims = (320, 240)
+        self.resize_dims = (640, 640)
+
+        # FPS 동기화를 위한 타겟 FPS 설정
+        self.target_fps = 10
+
+        # 시각화 옵션 (속도 최적화를 위해 False 권장)
+        self.vis_enabled = True
 
         # GUI 제어
         self.stop_event = threading.Event()  # 중단 신호
@@ -50,6 +44,7 @@ class VideoConverter:
         self.device = '0' if torch.cuda.is_available() else 'cpu'
         print(f"🚀 Device: {self.device}")
 
+        # 추적(Tracking) 지원 모델 로드
         self.model = YOLO(model_path)
         if self.device == '0':
             self.model.to('cuda')
@@ -76,11 +71,14 @@ class VideoConverter:
         Returns:
             List[List[float]]: 추출된 모든 시퀀스 데이터 리스트
         """
+        # 메모리 관리: 대량 데이터 처리 시 여기서 바로 CSV로 저장하고
+        # 리스트를 비우는 방식(Generator)을 권장하지만, 기존 구조 호환을 위해 리스트 유지.
         all_sequences = []
 
         # 미리보기 창 생성
-        cv2.namedWindow("Preview", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Preview", 640, 480)
+        if self.vis_enabled:
+            cv2.namedWindow("Preview", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("Preview", 640, 480)
 
         # 전체 비디오 파일 목록과 경로 생성
         video_files_to_process = []
@@ -95,7 +93,7 @@ class VideoConverter:
         total_files = len(video_files_to_process)
         if total_files == 0:
             print("처리할 영상 파일을 찾을 수 없습니다.")
-            cv2.destroyAllWindows()
+            if self.vis_enabled: cv2.destroyAllWindows()
             return []
 
         print(f"총 {total_files}개의 영상 파일을 처리합니다.")
@@ -113,7 +111,9 @@ class VideoConverter:
 
             self._process_single_video(video_path, label_name, all_sequences, current_progress, progress_callback)
 
-        cv2.destroyAllWindows()
+        if self.vis_enabled:
+            cv2.destroyAllWindows()
+
         return all_sequences
 
     def _process_single_video(
@@ -125,7 +125,7 @@ class VideoConverter:
             progress_callback=None
     ) -> None:
         """
-        2초 미만 필터링 + 2~3초 리샘플링 + 3초 이상 슬라이딩 윈도우
+        Tracking 적용 + Scale Normalization + Jittering Filter + FPS Sync
         """
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -136,19 +136,28 @@ class VideoConverter:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         filename = os.path.basename(video_path)
         if fps == 0: fps = 30.0
-        frame_step = max(1, int(fps * 0.1))
+
+        # 타겟 FPS에 맞춘 프레임 스텝 계산 (시간 동기화)
+        frame_step = max(1, int(fps / self.target_fps))
 
         frame_idx = 0
+
+        # 데이터 버퍼
         position_buffer = deque(maxlen=self.seq_length)
-        last_valid_pose = np.zeros((17, 2))
+
+        # 지터링 보정을 위한 이동 평균(Moving Average) 버퍼
+        raw_kps_buffer = deque(maxlen=3)  # 최근 3프레임 평균
+
+        # 초기값 처리: 첫 유효 프레임 전까지 None 유지
+        last_valid_pose = None
+
+        # 객체 추적을 위한 ID 변수
+        target_id = None
 
         data_generated_for_this_video = False
-
         SLIDING_STRIDE = 2
         frames_since_last_save = SLIDING_STRIDE
-
-        # 최소 길이 임계값 설정, 2초 미만 데이터는 버리고, 2초 이상은 프레임 보간
-        MIN_SAMPLES_FOR_RESAMPLING = 20  # 2초 (20개 샘플)
+        MIN_SAMPLES_FOR_RESAMPLING = int(self.seq_length * 0.7)  # 약 70% 이상이면 리샘플링
 
         while not self.stop_event.is_set():
             while self.pause_event.is_set():
@@ -163,77 +172,143 @@ class VideoConverter:
             frame_idx += 1
             if frame_idx % frame_step != 0: continue
 
+            # 리사이즈
             frame_resized = letterbox_resize(frame, self.resize_dims)
-            results = self.model(frame_resized, verbose=False, conf=0.5, device=self.device)
             display_frame = frame_resized.copy()
 
+            # YOLO Tracking 수행 (persist=True로 ID 유지)
+            # tracker는 botsort.yaml 또는 bytetrack.yaml 사용
+            results = self.model.track(frame_resized, persist=True, verbose=False, conf=0.5, device=self.device,
+                                       tracker="bytetrack.yaml")
+
+            current_kp = None
+            current_conf = None
+            current_box = None
+
+            # 감지된 객체가 있는지 확인
+            if results[0].boxes is not None and results[0].boxes.id is not None:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                track_ids = results[0].boxes.id.int().cpu().tolist()
+                keypoints = results[0].keypoints.xy.cpu().numpy()
+                confs = results[0].keypoints.conf.cpu().numpy()
+
+                # 타겟 ID 선정 로직
+                if target_id is None:
+                    # 초기 타겟: 박스 면적이 가장 큰 사람을 메인으로 선정
+                    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+                    if len(areas) > 0:
+                        max_idx = np.argmax(areas)
+                        target_id = track_ids[max_idx]
+
+                # 타겟 데이터 추출
+                if target_id in track_ids:
+                    idx = track_ids.index(target_id)
+                    current_kp = keypoints[idx]
+                    current_conf = confs[idx]
+                    current_box = boxes[idx]
+
+            # 데이터 가공
             norm_kp = np.zeros(34)
-            if results[0].keypoints is not None and len(results[0].keypoints.xy) > 0:
-                all_boxes = results[0].boxes.xyxy.cpu().numpy()
-                target_index = np.argmax((all_boxes[:, 2] - all_boxes[:, 0]) * (all_boxes[:, 3] - all_boxes[:, 1]))
+            valid_frame_processed = False
 
-                raw_kp = results[0].keypoints.xy.cpu().numpy()[target_index]
-                conf = results[0].keypoints.conf.cpu().numpy()[target_index]
-                box = results[0].boxes.xyxy.cpu().numpy()[target_index]
+            if current_kp is not None:
+                # 초기값 초기화 (최초 1회)
+                if last_valid_pose is None:
+                    last_valid_pose = current_kp
 
-                filled_kp = fill_missing_keypoints(raw_kp, conf, last_valid_pose)
+                # 결측치 보간 (기존 로직 활용)
+                filled_kp = fill_missing_keypoints(current_kp, current_conf, last_valid_pose)
                 last_valid_pose = filled_kp
-                anchor = get_stable_anchor(filled_kp, conf)
 
-                norm_kp = normalize_to_relative(filled_kp, anchor)
-                self._draw_visualization(display_frame, raw_kp, conf, box)
+                # 지터링 보정 (Moving Average)
+                raw_kps_buffer.append(filled_kp)
+                smoothed_kp = np.mean(np.array(raw_kps_buffer), axis=0)
 
-            position_buffer.append(norm_kp)
-            frames_since_last_save += 1
+                # 중심점(Anchor) 계산
+                anchor = get_stable_anchor(smoothed_kp, current_conf)  # smooth된 값 사용
 
-            if len(position_buffer) == self.seq_length:
-                if frames_since_last_save >= SLIDING_STRIDE:
-                    pos_seq = np.array(position_buffer)
-                    vel_seq = np.diff(pos_seq, axis=0)
-                    acc_seq = np.diff(vel_seq, axis=0)
+                # anchor가 None일 경우 예외 처리 (박스 중심으로 대체)
+                if anchor is None:
+                    # 박스의 중심점 (Center of Bounding Box) 계산
+                    cx = (current_box[0] + current_box[2]) / 2
+                    cy = (current_box[1] + current_box[3]) / 2
+                    anchor = np.array([cx, cy])
 
-                    vel_seq_padded = np.pad(vel_seq, ((1, 0), (0, 0)), 'constant')
-                    acc_seq_padded = np.pad(acc_seq, ((2, 0), (0, 0)), 'constant')
+                # 스케일 정규화 (Scale Normalization)
+                # 박스 높이 또는 몸통 길이를 기준으로 정규화하여 거리 불변성 확보
+                box_h = current_box[3] - current_box[1]
+                scale_factor = max(box_h, 1.0)  # 0 나누기 방지
 
-                    full_feature_seq = np.concatenate((pos_seq, vel_seq_padded, acc_seq_padded), axis=1)
-                    flat = full_feature_seq.flatten().tolist()
+                # 상대 좌표 계산 후 스케일로 나누기
+                # pose_utils의 normalize_to_relative가 단순히 (kp-anchor)라면, 여기서 직접 나눔
+                relative_kp = smoothed_kp - anchor
+                # 0~1 사이로 정규화하기 위해 (Scale Normalization)
+                norm_kp_vec = relative_kp / scale_factor
+                norm_kp = norm_kp_vec.flatten()  # 1차원 배열로 변환
 
-                    flat.append(label)
-                    flat.append(filename)
+                valid_frame_processed = True
 
-                    end_frame = frame_idx
-                    start_frame = max(0, end_frame - (self.seq_length * frame_step))
-                    flat.append(f"{start_frame}~{end_frame}")
+                if self.vis_enabled:
+                    self._draw_visualization(display_frame, smoothed_kp, current_conf, current_box, target_id)
 
-                    end_sec, start_sec = end_frame / fps, start_frame / fps
-                    time_str = f"{int(start_sec // 60):02d}:{int(start_sec % 60):02d}-{int(end_sec // 60):02d}:{int(end_sec % 60):02d}"
-                    flat.append(time_str)
-                    data_storage.append(flat)
+            # 버퍼 관리
+            # 데이터 품질을 위해 타겟을 놓치면(valid_frame_processed=False) 버퍼에 추가하지 않거나
+            # 짧은 결측은 이전 데이터로 채우는 등의 전략이 필요. 여기서는 타겟 감지시에만 추가.
+            if valid_frame_processed:
+                position_buffer.append(norm_kp)
+                frames_since_last_save += 1
 
-                    cv2.circle(display_frame, (self.resize_dims[0] - 20, 20), 8, (0, 0, 255), -1)
+                # 시퀀스 데이터 생성
+                if len(position_buffer) == self.seq_length:
+                    if frames_since_last_save >= SLIDING_STRIDE:
+                        pos_seq = np.array(position_buffer)
+                        vel_seq = np.diff(pos_seq, axis=0)
+                        acc_seq = np.diff(vel_seq, axis=0)
 
-                    data_generated_for_this_video = True
-                    frames_since_last_save = 0
+                        vel_seq_padded = np.pad(vel_seq, ((1, 0), (0, 0)), 'constant')
+                        acc_seq_padded = np.pad(acc_seq, ((2, 0), (0, 0)), 'constant')
 
+                        full_feature_seq = np.concatenate((pos_seq, vel_seq_padded, acc_seq_padded), axis=1)
+                        flat = full_feature_seq.flatten().tolist()
+
+                        flat.append(label)
+                        flat.append(filename)
+
+                        end_frame = frame_idx
+                        start_frame = max(0, end_frame - (self.seq_length * frame_step))
+                        flat.append(f"{start_frame}~{end_frame}")
+
+                        end_sec, start_sec = end_frame / fps, start_frame / fps
+                        time_str = f"{int(start_sec // 60):02d}:{int(start_sec % 60):02d}-{int(end_sec // 60):02d}:{int(end_sec % 60):02d}"
+                        flat.append(time_str)
+                        data_storage.append(flat)
+
+                        if self.vis_enabled:
+                            cv2.circle(display_frame, (self.resize_dims[0] - 20, 20), 8, (0, 0, 255), -1)
+
+                        data_generated_for_this_video = True
+                        frames_since_last_save = 0
+
+            # 진행률 표시
             file_progress = (frame_idx / total_frames) * 100 if total_frames > 0 else 0
             if progress_callback:
                 progress_callback(os.path.basename(video_path), file_progress, total_progress)
 
-            cv2.putText(display_frame, f"File: {filename}", (5, 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            cv2.putText(display_frame, f"File Progress: {file_progress:.1f}%", (5, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.putText(display_frame, f"Total Progress: {total_progress:.1f}%", (5, 45),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-            cv2.putText(display_frame, f"Class: {label.upper()}", (5, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+            if self.vis_enabled:
+                cv2.putText(display_frame, f"File: {filename}", (5, 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                cv2.putText(display_frame, f"Target ID: {target_id}", (5, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                cv2.putText(display_frame, f"Buffer: {len(position_buffer)}/{self.seq_length}", (5, 45),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
 
-            cv2.imshow("Preview", display_frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                self.stop_event.set()
-                break
+                cv2.imshow("Preview", display_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    self.stop_event.set()
+                    break
 
-        # 영상 처리 완료 후, 하이브리드 로직
+        # 영상 처리 완료 후, 하이브리드 로직 (리샘플링)
+        # 데이터가 하나도 생성되지 않았고, 버퍼에 데이터가 어느 정도 있다면 보간
         if not data_generated_for_this_video and len(position_buffer) > 0:
 
             if len(position_buffer) >= MIN_SAMPLES_FOR_RESAMPLING:
@@ -267,7 +342,7 @@ class VideoConverter:
                 data_storage.append(flat)
 
             else:
-                print(f"  -> 영상이 너무 짧아({len(position_buffer)} < {MIN_SAMPLES_FOR_RESAMPLING} 샘플) 데이터 생성에서 제외합니다.")
+                print(f"  -> 영상이 너무 짧거나 타겟을 놓쳤습니다. ({len(position_buffer)} 샘플) 데이터 생성 제외.")
 
         cap.release()
 
@@ -276,14 +351,19 @@ class VideoConverter:
             img: np.ndarray,
             kp: np.ndarray,
             conf: np.ndarray,
-            box: np.ndarray
+            box: np.ndarray,
+            track_id: int
     ) -> None:
         """
-        프레임 위에 객체 박스, 뼈대, 관절을 표시
+        프레임 위에 객체 박스, 뼈대, 관절을 표시 (Target ID 포함)
         """
         # 객체 박스
         x1, y1, x2, y2 = map(int, box)
         cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 2)
+
+        # ID 표시
+        cv2.putText(img, f"ID: {track_id}", (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
 
         # 와이어프레임
         for s, e in self.skeleton:

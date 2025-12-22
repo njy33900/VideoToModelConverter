@@ -250,7 +250,6 @@ class MainGUI:
         left_container = tk.Frame(paned, width=300)
         paned.add(left_container, weight=1)
 
-
         # 모델 선택
         model_frame = ttk.LabelFrame(left_container, text="모델 선택")
         model_frame.pack(fill=tk.X, padx=10, pady=10)
