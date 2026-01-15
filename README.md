@@ -9,7 +9,7 @@ VideoToCSV/
 ├── .venv/                 # 가상환경
 ├── analyzed/              # 변환 완료된 CSV 데이터 저장소
 ├── logs/                  # 시스템 로그
-├── raw_videos/            # 학습용 원본 영상 폴더
+├── raw_videos/            # 학습용 원본 영상 폴더(예시)
 │   ├── movement/          # [Class 1] 이동 행동 영상
 │   ├── neutral/           # [Class 0] 정지/평상시 영상
 │   └── threat/            # [Class 2] 위협/이상 행동 영상
@@ -20,6 +20,8 @@ VideoToCSV/
 ├── gui.py                 # Tkinter 기반 GUI 구성
 ├── main.py                # 프로그램 진입점 (Entry Point)
 ├── pose_utils.py          # 관절 좌표 보정 및 정규화 알고리즘
+├── onnx_convert.py        # 학습된 모델을 범용 포맷(ONNX)로 변환하는 스크립트
+├── onnx_run.py            # 변환된 ONNX파일을 동작시켜 테스트하는 스크립트
 └── .gitignore
 ```
 
@@ -38,8 +40,8 @@ git clone https://github.com/njy33900/VideoToModelConverter.git
 pip install opencv-python ultralytics pandas numpy tensorflow scikit-learn pillow
 ```
 
-## 🚀 사용 방법 (Usage)
-### 1. 데이터 준비
+## 사용 방법
+### 1. 데이터 준비(예시)
 raw_videos 폴더 내에 클래스별로 영상을 넣습니다.
 - neutral: 가만히 서 있거나, 핸드폰 보기, 뒷짐 지기 등.  
   ※ 발이 떨어지지 않는 자세들
